@@ -9,8 +9,12 @@ require('dotenv').config({ path: path.resolve(__dirname, '../.env') });
 
 // Ensure local uploads folder exists for fallback
 const uploadDir = path.join(__dirname, '../uploads');
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
+try {
+  if (!fs.existsSync(uploadDir)) {
+    fs.mkdirSync(uploadDir, { recursive: true });
+  }
+} catch (error) {
+  console.log('Skipping local uploads directory creation (likely read-only environment)');
 }
 
 let storage;
