@@ -2,6 +2,16 @@ const express = require('express');
 const router = express.Router();
 const { prisma } = require('../config/db');
 const { protect, admin } = require('../middleware/authMiddleware');
+const { upload, isCloudinaryConfigured } = require('../config/cloudinary');
+
+const getFileUrl = (file) => {
+  if (!file) return null;
+  if (isCloudinaryConfigured) {
+    return file.path;
+  } else {
+    return `/uploads/${file.filename}`;
+  }
+};
 
 // @route   GET /api/admin/users/pending
 // @desc    Get all pending user registrations (not approved yet)
@@ -185,10 +195,10 @@ router.get('/chits-records', protect, admin, async (req, res) => {
 // @route   POST /api/admin/chits/:chitId/mark-paid
 // @desc    Manually mark a user's payment for a specific month as paid
 // @access  Private/Admin
-router.post('/chits/:chitId/mark-paid', protect, admin, async (req, res) => {
+router.post('/chits/:chitId/mark-paid', protect, admin, upload.single('proof'), async (req, res) => {
   try {
     const { chitId } = req.params;
-    const { userId, monthNumber, amount } = req.body;
+    const { userId, monthNumber, amount, transactionId } = req.body;
 
     if (!userId || !monthNumber || !amount) {
       return res.status(400).json({ success: false, message: 'Missing required fields' });
@@ -220,6 +230,11 @@ router.post('/chits/:chitId/mark-paid', protect, admin, async (req, res) => {
       return res.status(400).json({ success: false, message: 'Payment already recorded for this month.' });
     }
 
+    let proofImgUrl = 'MANUAL_ENTRY';
+    if (req.file) {
+      proofImgUrl = getFileUrl(req.file);
+    }
+
     // Create the manual payment record
     const payment = await prisma.payment.create({
       data: {
@@ -227,8 +242,8 @@ router.post('/chits/:chitId/mark-paid', protect, admin, async (req, res) => {
         chitId,
         monthNumber: Number(monthNumber),
         amount: Number(amount),
-        transactionId: `MANUAL_${Date.now()}`,
-        proofImgUrl: 'MANUAL_ENTRY',
+        transactionId: transactionId || `MANUAL_${Date.now()}`,
+        proofImgUrl,
         status: 'approved',
         remarks: 'Manually marked as paid by Admin',
         verifiedAt: new Date(),
