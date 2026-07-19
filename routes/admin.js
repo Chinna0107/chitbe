@@ -139,16 +139,24 @@ router.get('/users-records', protect, staff, async (req, res) => {
       where: { role: 'user' },
       orderBy: { createdAt: 'desc' }
     });
+
+    // Chits: employees only see their own created chits
     const chits = await prisma.chit.findMany({
       where: isEmp ? { createdBy: req.user.id } : {},
       include: { members: { include: { user: true } } }
     });
+
+    // Build set of allowed chit IDs for payment filtering
+    const allowedChitIds = new Set(chits.map(c => c.id));
+
+    // Payments: employees only see payments for their chits
     const payments = await prisma.payment.findMany({
+      where: isEmp ? { chitId: { in: [...allowedChitIds] } } : {},
       include: { chit: true }
     });
 
     if (isEmp) {
-      // Employees only see users that are in their assigned chits
+      // Employees only see users that are members of their assigned chits
       const allowedUserIds = new Set();
       chits.forEach(chit => {
         chit.members.forEach(member => {
@@ -171,7 +179,10 @@ router.get('/users-records', protect, staff, async (req, res) => {
         chitValue: chit.chitValue
       }));
 
-      const userPayments = payments.filter(p => p.userId === user.id);
+      // Only return payments for this user AND for the allowed chits
+      const userPayments = payments.filter(p => 
+        p.userId === user.id && allowedChitIds.has(p.chitId)
+      );
 
       return {
         user,
@@ -186,6 +197,7 @@ router.get('/users-records', protect, staff, async (req, res) => {
     res.status(500).json({ success: false, message: 'Server error fetching user records' });
   }
 });
+
 
 // @route   GET /api/admin/chits-records
 // @desc    Get all chit pools and member details and installment history
