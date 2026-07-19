@@ -46,4 +46,13 @@ const admin = (req, res, next) => {
   }
 };
 
-module.exports = { protect, admin };
+// Allows both superadmin and employee roles
+const staff = (req, res, next) => {
+  if (req.user && (req.user.role === 'superadmin' || req.user.role === 'employee')) {
+    next();
+  } else {
+    res.status(403).json({ success: false, message: 'Not authorized as staff' });
+  }
+};
+
+module.exports = { protect, admin, staff };

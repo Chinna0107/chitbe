@@ -1,12 +1,12 @@
 const express = require('express');
 const router = express.Router();
 const { prisma } = require('../config/db');
-const { protect, admin } = require('../middleware/authMiddleware');
+const { protect, admin, staff } = require('../middleware/authMiddleware');
 
 // @route   POST /api/chits
 // @desc    Create a new chit group
-// @access  Private/Admin
-router.post('/', protect, admin, async (req, res) => {
+// @access  Private/Staff
+router.post('/', protect, staff, async (req, res) => {
   try {
     const { name, totalMembers, chitValue, monthlyContribution, durationMonths, termsAndConditions } = req.body;
 
@@ -27,6 +27,7 @@ router.post('/', protect, admin, async (req, res) => {
         durationMonths: Number(durationMonths),
         termsAndConditions: termsAndConditions || "",
         status: 'upcoming',
+        createdBy: req.user.role === 'employee' ? req.user.id : null,
       }
     });
 
@@ -42,8 +43,13 @@ router.post('/', protect, admin, async (req, res) => {
 // @access  Private
 router.get('/', protect, async (req, res) => {
   try {
+    const isEmp = req.user.role === 'employee';
+    const whereClause = isEmp ? { createdBy: req.user.id } : {};
+
     const chits = await prisma.chit.findMany({
+      where: whereClause,
       include: {
+        creator: { select: { name: true, role: true } },
         members: {
           include: {
             user: {
@@ -132,8 +138,8 @@ router.post('/:id/join', protect, async (req, res) => {
 
 // @route   POST /api/chits/:id/approve-member
 // @desc    Approve or reject a member request to join a chit
-// @access  Private/Admin
-router.post('/:id/approve-member', protect, admin, async (req, res) => {
+// @access  Private/Staff
+router.post('/:id/approve-member', protect, staff, async (req, res) => {
   try {
     const { userId, status } = req.body; // status: 'approved' or 'rejected'
 
@@ -148,6 +154,11 @@ router.post('/:id/approve-member', protect, admin, async (req, res) => {
 
     if (!chit) {
       return res.status(404).json({ success: false, message: 'Chit not found' });
+    }
+
+    // Verify employee owns this chit
+    if (req.user.role === 'employee' && chit.createdBy !== req.user.id) {
+      return res.status(403).json({ success: false, message: 'You can only manage chits assigned to you' });
     }
 
     if (chit.status !== 'upcoming') {
@@ -197,8 +208,8 @@ router.post('/:id/approve-member', protect, admin, async (req, res) => {
 
 // @route   POST /api/chits/:id/activate
 // @desc    Manually activate/start a chit scheme when members list is complete
-// @access  Private/Admin
-router.post('/:id/activate', protect, admin, async (req, res) => {
+// @access  Private/Staff
+router.post('/:id/activate', protect, staff, async (req, res) => {
   try {
     const chit = await prisma.chit.findUnique({ 
       where: { id: req.params.id },
@@ -207,6 +218,11 @@ router.post('/:id/activate', protect, admin, async (req, res) => {
 
     if (!chit) {
       return res.status(404).json({ success: false, message: 'Chit not found' });
+    }
+
+    // Verify employee owns this chit
+    if (req.user.role === 'employee' && chit.createdBy !== req.user.id) {
+      return res.status(403).json({ success: false, message: 'You can only manage chits assigned to you' });
     }
 
     if (chit.status !== 'upcoming') {

@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { prisma } = require('../config/db');
-const { protect, admin } = require('../middleware/authMiddleware');
+const { protect, admin, staff } = require('../middleware/authMiddleware');
 const { upload, isCloudinaryConfigured } = require('../config/cloudinary');
 
 const getFileUrl = (file) => {
@@ -73,21 +73,29 @@ router.post('/users/:id/verify', protect, admin, async (req, res) => {
 
 // @route   GET /api/admin/dashboard-stats
 // @desc    Get metrics for admin dashboard
-// @access  Private/Admin
-router.get('/dashboard-stats', protect, admin, async (req, res) => {
+// @access  Private/Staff
+router.get('/dashboard-stats', protect, staff, async (req, res) => {
   try {
+    const isEmp = req.user.role === 'employee';
+    const chitWhere = isEmp ? { createdBy: req.user.id } : {};
+
     const totalUsers = await prisma.user.count({ where: { role: 'user', isApproved: true } });
     const pendingApprovals = await prisma.user.count({ where: { role: 'user', isApproved: false } });
-    const totalChits = await prisma.chit.count();
-    const activeChits = await prisma.chit.count({ where: { status: 'active' } });
+    const totalChits = await prisma.chit.count({ where: chitWhere });
+    const activeChits = await prisma.chit.count({ where: { ...chitWhere, status: 'active' } });
     
     // Total revenue = sum of approved payments
-    const payments = await prisma.payment.findMany({ where: { status: 'approved' } });
+    const payments = await prisma.payment.findMany({ 
+      where: { 
+        status: 'approved',
+        ...(isEmp ? { chit: { createdBy: req.user.id } } : {})
+      } 
+    });
     const totalRevenue = payments.reduce((acc, curr) => acc + curr.amount, 0);
     const pendingPaymentsCount = await prisma.payment.count({ where: { status: 'pending' } });
 
     const upcomingChits = await prisma.chit.findMany({
-      where: { status: 'upcoming' },
+      where: { ...chitWhere, status: 'upcoming' },
       include: { members: true }
     });
     
@@ -122,19 +130,33 @@ router.get('/dashboard-stats', protect, admin, async (req, res) => {
 
 // @route   GET /api/admin/users-records
 // @desc    Get all user profiles and transaction history (chits & payments)
-// @access  Private/Admin
-router.get('/users-records', protect, admin, async (req, res) => {
+// @access  Private/Staff
+router.get('/users-records', protect, staff, async (req, res) => {
   try {
-    const users = await prisma.user.findMany({
+    const isEmp = req.user.role === 'employee';
+    
+    let users = await prisma.user.findMany({
       where: { role: 'user' },
       orderBy: { createdAt: 'desc' }
     });
     const chits = await prisma.chit.findMany({
+      where: isEmp ? { createdBy: req.user.id } : {},
       include: { members: { include: { user: true } } }
     });
     const payments = await prisma.payment.findMany({
       include: { chit: true }
     });
+
+    if (isEmp) {
+      // Employees only see users that are in their assigned chits
+      const allowedUserIds = new Set();
+      chits.forEach(chit => {
+        chit.members.forEach(member => {
+          if (member.userId) allowedUserIds.add(member.userId);
+        });
+      });
+      users = users.filter(user => allowedUserIds.has(user.id));
+    }
 
     const userRecords = users.map(user => {
       const joinedChits = chits.filter(chit => 
@@ -167,11 +189,16 @@ router.get('/users-records', protect, admin, async (req, res) => {
 
 // @route   GET /api/admin/chits-records
 // @desc    Get all chit pools and member details and installment history
-// @access  Private/Admin
-router.get('/chits-records', protect, admin, async (req, res) => {
+// @access  Private/Staff
+router.get('/chits-records', protect, staff, async (req, res) => {
   try {
+    const isEmp = req.user.role === 'employee';
     const chits = await prisma.chit.findMany({
-      include: { members: { include: { user: true } } }
+      where: isEmp ? { createdBy: req.user.id } : {},
+      include: { 
+        members: { include: { user: true } },
+        creator: { select: { name: true, role: true } }
+      }
     });
     const payments = await prisma.payment.findMany({
       include: { user: true }
@@ -194,8 +221,8 @@ router.get('/chits-records', protect, admin, async (req, res) => {
 
 // @route   POST /api/admin/chits/:chitId/mark-paid
 // @desc    Manually mark a user's payment for a specific month as paid
-// @access  Private/Admin
-router.post('/chits/:chitId/mark-paid', protect, admin, upload.single('proof'), async (req, res) => {
+// @access  Private/Staff
+router.post('/chits/:chitId/mark-paid', protect, staff, upload.single('proof'), async (req, res) => {
   try {
     const { chitId } = req.params;
     const { userId, monthNumber, amount, transactionId } = req.body;
@@ -208,6 +235,10 @@ router.post('/chits/:chitId/mark-paid', protect, admin, upload.single('proof'), 
     const chit = await prisma.chit.findUnique({ where: { id: chitId } });
     if (!chit) {
       return res.status(404).json({ success: false, message: 'Chit not found' });
+    }
+    
+    if (req.user.role === 'employee' && chit.createdBy !== req.user.id) {
+      return res.status(403).json({ success: false, message: 'Not authorized for this chit' });
     }
 
     const user = await prisma.user.findUnique({ where: { id: userId } });
@@ -257,4 +288,204 @@ router.post('/chits/:chitId/mark-paid', protect, admin, upload.single('proof'), 
   }
 });
 
+// @route   POST /api/admin/payments/:id/allow-edit
+// @desc    Grant user permission to edit/resubmit their payment (sets status to edit_requested)
+// @access  Private/Staff
+router.post('/payments/:id/allow-edit', protect, staff, async (req, res) => {
+  try {
+    const payment = await prisma.payment.findUnique({ 
+      where: { id: req.params.id },
+      include: { chit: true }
+    });
+
+    if (!payment) {
+      return res.status(404).json({ success: false, message: 'Payment record not found' });
+    }
+
+    if (req.user.role === 'employee' && payment.chit.createdBy !== req.user.id) {
+      return res.status(403).json({ success: false, message: 'Not authorized for this chit' });
+    }
+
+    if (payment.status !== 'pending') {
+      return res.status(400).json({ success: false, message: `Cannot allow edit on a payment with status: ${payment.status}` });
+    }
+
+    const updatedPayment = await prisma.payment.update({
+      where: { id: payment.id },
+      data: {
+        status: 'edit_requested',
+        remarks: 'Admin has requested you to update your payment details and resubmit.'
+      }
+    });
+
+    res.json({
+      success: true,
+      message: 'Edit access granted. User can now update and resubmit this payment.',
+      data: updatedPayment
+    });
+  } catch (error) {
+    console.error('Error allowing payment edit:', error);
+    res.status(500).json({ success: false, message: 'Server error granting edit access' });
+  }
+});
+
+// @route   POST /api/admin/payments/:id/mark-unpaid
+// @desc    Reset an approved payment back to pending (mark as unpaid / unverified)
+// @access  Private/Staff
+router.post('/payments/:id/mark-unpaid', protect, staff, async (req, res) => {
+  try {
+    const { remarks } = req.body;
+
+    const payment = await prisma.payment.findUnique({ 
+      where: { id: req.params.id },
+      include: { chit: true }
+    });
+
+    if (!payment) {
+      return res.status(404).json({ success: false, message: 'Payment record not found' });
+    }
+
+    if (req.user.role === 'employee' && payment.chit.createdBy !== req.user.id) {
+      return res.status(403).json({ success: false, message: 'Not authorized for this chit' });
+    }
+
+    const updatedPayment = await prisma.payment.update({
+      where: { id: payment.id },
+      data: {
+        status: 'edit_requested',
+        remarks: remarks || 'Marked as unpaid by Admin. Please update your transaction ID and re-upload the payment screenshot.',
+        verifiedAt: null
+      }
+    });
+
+    res.json({
+      success: true,
+      message: 'Payment has been marked as unpaid and returned to verification queue.',
+      data: updatedPayment
+    });
+  } catch (error) {
+    console.error('Error marking payment as unpaid:', error);
+    res.status(500).json({ success: false, message: 'Server error marking payment as unpaid' });
+  }
+});
+
+// ==========================================
+// EMPLOYEE (STAFF) MANAGEMENT ROUTES
+// ==========================================
+
+// @route   GET /api/admin/employees
+// @desc    Get all employees
+// @access  Private/Admin
+router.get('/employees', protect, admin, async (req, res) => {
+  try {
+    const employees = await prisma.user.findMany({
+      where: { role: 'employee' },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        phone: true,
+        createdAt: true,
+        createdChits: {
+          select: { id: true, name: true, status: true }
+        }
+      },
+      orderBy: { createdAt: 'desc' }
+    });
+    res.json({ success: true, data: employees });
+  } catch (error) {
+    console.error('Error fetching employees:', error);
+    res.status(500).json({ success: false, message: 'Server error fetching employees' });
+  }
+});
+
+// @route   POST /api/admin/employees
+// @desc    Create a new employee account
+// @access  Private/Admin
+router.post('/employees', protect, admin, async (req, res) => {
+  try {
+    const { name, email, phone, password } = req.body;
+
+    if (!name || !email || !phone || !password) {
+      return res.status(400).json({ success: false, message: 'Please provide all fields' });
+    }
+
+    const existingUser = await prisma.user.findUnique({ where: { email } });
+    if (existingUser) {
+      return res.status(400).json({ success: false, message: 'Email already in use' });
+    }
+
+    const bcrypt = require('bcryptjs');
+    const salt = await bcrypt.genSalt(10);
+    const hashedPassword = await bcrypt.hash(password, salt);
+
+    const employee = await prisma.user.create({
+      data: {
+        name,
+        email,
+        phone,
+        password: hashedPassword,
+        role: 'employee',
+        isApproved: true, // Employees are auto-approved
+      },
+      select: { id: true, name: true, email: true, role: true }
+    });
+
+    res.status(201).json({ success: true, message: 'Employee created successfully', data: employee });
+  } catch (error) {
+    console.error('Error creating employee:', error);
+    res.status(500).json({ success: false, message: 'Server error creating employee' });
+  }
+});
+
+// @route   DELETE /api/admin/employees/:id
+// @desc    Delete an employee account
+// @access  Private/Admin
+router.delete('/employees/:id', protect, admin, async (req, res) => {
+  try {
+    const employee = await prisma.user.findUnique({ where: { id: req.params.id } });
+    if (!employee || employee.role !== 'employee') {
+      return res.status(404).json({ success: false, message: 'Employee not found' });
+    }
+
+    await prisma.user.delete({ where: { id: req.params.id } });
+    res.json({ success: true, message: 'Employee deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting employee:', error);
+    res.status(500).json({ success: false, message: 'Server error deleting employee' });
+  }
+});
+
+// @route   PUT /api/admin/chits/:chitId/assign
+// @desc    Assign a chit to an employee
+// @access  Private/Admin
+router.put('/chits/:chitId/assign', protect, admin, async (req, res) => {
+  try {
+    const { employeeId } = req.body; // Can be null to unassign
+    
+    if (employeeId) {
+      const employee = await prisma.user.findUnique({ where: { id: employeeId } });
+      if (!employee || employee.role !== 'employee') {
+        return res.status(400).json({ success: false, message: 'Invalid employee ID' });
+      }
+    }
+
+    const chit = await prisma.chit.update({
+      where: { id: req.params.chitId },
+      data: { createdBy: employeeId || null },
+      include: { creator: { select: { id: true, name: true } } }
+    });
+
+    res.json({ 
+      success: true, 
+      message: employeeId ? `Chit assigned to ${chit.creator.name}` : 'Chit unassigned',
+      data: chit 
+    });
+  } catch (error) {
+    console.error('Error assigning chit:', error);
+    res.status(500).json({ success: false, message: 'Server error assigning chit' });
+  }
+});
+
 module.exports = router;
+

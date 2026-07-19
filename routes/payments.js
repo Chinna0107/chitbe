@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { prisma } = require('../config/db');
-const { protect, admin } = require('../middleware/authMiddleware');
+const { protect, admin, staff } = require('../middleware/authMiddleware');
 const { upload, isCloudinaryConfigured } = require('../config/cloudinary');
 
 const getFileUrl = (file) => {
@@ -60,7 +60,13 @@ router.post('/submit', protect, upload.single('proof'), async (req, res) => {
     });
 
     if (existingPayment) {
-      if (existingPayment.status === 'rejected') {
+      // Allow resubmission when: rejected, edit_requested, or pending WITH an admin remark
+      const canResubmit =
+        existingPayment.status === 'rejected' ||
+        existingPayment.status === 'edit_requested' ||
+        (existingPayment.status === 'pending' && existingPayment.remarks && existingPayment.remarks.trim() !== '');
+
+      if (canResubmit) {
         const updatedPayment = await prisma.payment.update({
           where: { id: existingPayment.id },
           data: {
@@ -69,7 +75,7 @@ router.post('/submit', protect, upload.single('proof'), async (req, res) => {
             proofImgUrl: getFileUrl(req.file),
             proofPublicId: getPublicId(req.file),
             status: 'pending',
-            remarks: 'Resubmitted proof'
+            remarks: ''
           }
         });
         return res.json({ success: true, message: 'Payment proof resubmitted successfully!', data: updatedPayment });
@@ -79,6 +85,8 @@ router.post('/submit', protect, upload.single('proof'), async (req, res) => {
         message: `Payment proof for Month ${monthNumber} is already ${existingPayment.status}`,
       });
     }
+
+
 
     const payment = await prisma.payment.create({
       data: {
@@ -123,14 +131,19 @@ router.get('/my-payments', protect, async (req, res) => {
 
 // @route   GET /api/payments/pending
 // @desc    Get all pending payments for admin review
-// @access  Private/Admin
-router.get('/pending', protect, admin, async (req, res) => {
+// @access  Private/Staff
+router.get('/pending', protect, staff, async (req, res) => {
   try {
+    const isEmp = req.user.role === 'employee';
+
     const payments = await prisma.payment.findMany({
-      where: { status: 'pending' },
+      where: { 
+        status: 'pending',
+        ...(isEmp ? { chit: { createdBy: req.user.id } } : {})
+      },
       include: {
         user: { select: { name: true, email: true, phone: true } },
-        chit: { select: { name: true, chitValue: true, monthlyContribution: true, currentMonth: true } }
+        chit: { select: { name: true, chitValue: true, monthlyContribution: true, currentMonth: true, createdBy: true } }
       },
       orderBy: { createdAt: 'asc' }
     });
@@ -143,8 +156,8 @@ router.get('/pending', protect, admin, async (req, res) => {
 
 // @route   POST /api/payments/:id/verify
 // @desc    Approve or reject user payment proof
-// @access  Private/Admin
-router.post('/:id/verify', protect, admin, async (req, res) => {
+// @access  Private/Staff
+router.post('/:id/verify', protect, staff, async (req, res) => {
   try {
     const { status, remarks } = req.body; // status: 'approved' | 'rejected'
 
@@ -152,10 +165,17 @@ router.post('/:id/verify', protect, admin, async (req, res) => {
       return res.status(400).json({ success: false, message: 'Please provide status approved or rejected' });
     }
 
-    const payment = await prisma.payment.findUnique({ where: { id: req.params.id } });
+    const payment = await prisma.payment.findUnique({ 
+      where: { id: req.params.id },
+      include: { chit: true }
+    });
 
     if (!payment) {
       return res.status(404).json({ success: false, message: 'Payment record not found' });
+    }
+
+    if (req.user.role === 'employee' && payment.chit.createdBy !== req.user.id) {
+      return res.status(403).json({ success: false, message: 'Not authorized for this chit' });
     }
 
     const updatedPayment = await prisma.payment.update({
