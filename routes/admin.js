@@ -143,7 +143,10 @@ router.get('/users-records', protect, staff, async (req, res) => {
     // Chits: employees only see their own created chits
     const chits = await prisma.chit.findMany({
       where: isEmp ? { createdBy: req.user.id } : {},
-      include: { members: { include: { user: true } } }
+      include: { 
+        members: { include: { user: true } },
+        freezes: { include: { user: true } }
+      }
     });
 
     // Build set of allowed chit IDs for payment filtering
@@ -176,7 +179,8 @@ router.get('/users-records', protect, staff, async (req, res) => {
         currentMonth: chit.currentMonth,
         durationMonths: chit.durationMonths,
         monthlyContribution: chit.monthlyContribution,
-        chitValue: chit.chitValue
+        chitValue: chit.chitValue,
+        freezes: chit.freezes
       }));
 
       // Only return payments for this user AND for the allowed chits
@@ -209,7 +213,8 @@ router.get('/chits-records', protect, staff, async (req, res) => {
       where: isEmp ? { createdBy: req.user.id } : {},
       include: { 
         members: { include: { user: true } },
-        creator: { select: { name: true, role: true } }
+        creator: { select: { name: true, role: true } },
+        freezes: { include: { user: true } }
       }
     });
     const payments = await prisma.payment.findMany({
@@ -496,6 +501,30 @@ router.put('/chits/:chitId/assign', protect, admin, async (req, res) => {
   } catch (error) {
     console.error('Error assigning chit:', error);
     res.status(500).json({ success: false, message: 'Server error assigning chit' });
+  }
+});
+
+// @route   GET /api/admin/frozen-months
+// @desc    Get all taken payments (frozen months) across chits
+// @access  Private/Staff
+router.get('/frozen-months', protect, staff, async (req, res) => {
+  try {
+    const isEmp = req.user.role === 'employee';
+    
+    // Fetch all freezes. If employee, only for chits they created.
+    const freezes = await prisma.chitFreeze.findMany({
+      where: isEmp ? { chit: { createdBy: req.user.id } } : {},
+      include: {
+        chit: true,
+        user: true
+      },
+      orderBy: { createdAt: 'desc' }
+    });
+
+    res.json({ success: true, data: freezes });
+  } catch (error) {
+    console.error('Error fetching frozen months:', error);
+    res.status(500).json({ success: false, message: 'Server error fetching frozen months' });
   }
 });
 

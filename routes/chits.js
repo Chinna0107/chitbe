@@ -56,6 +56,13 @@ router.get('/', protect, async (req, res) => {
               select: { id: true, name: true, email: true, phone: true }
             }
           }
+        },
+        freezes: {
+          include: {
+            user: {
+              select: { id: true, name: true }
+            }
+          }
         }
       }
     });
@@ -78,6 +85,13 @@ router.get('/:id', protect, async (req, res) => {
           include: {
             user: {
               select: { id: true, name: true, email: true, phone: true }
+            }
+          }
+        },
+        freezes: {
+          include: {
+            user: {
+              select: { id: true, name: true }
             }
           }
         }
@@ -259,6 +273,72 @@ router.post('/:id/activate', protect, staff, async (req, res) => {
   } catch (error) {
     console.error('Error activating chit:', error);
     res.status(500).json({ success: false, message: 'Server error activating chit' });
+  }
+});
+
+// @route   POST /api/chits/:id/freeze
+// @desc    Freeze a specific month in a chit for the user
+// @access  Private
+router.post('/:id/freeze', protect, async (req, res) => {
+  try {
+    const { monthNumber } = req.body;
+    const chitId = req.params.id;
+    const userId = req.user.id;
+
+    if (!monthNumber) {
+      return res.status(400).json({ success: false, message: 'Month number is required' });
+    }
+
+    const chit = await prisma.chit.findUnique({
+      where: { id: chitId },
+      include: { freezes: true, members: true }
+    });
+
+    if (!chit) {
+      return res.status(404).json({ success: false, message: 'Chit not found' });
+    }
+
+    // Check if user is a member
+    const isMember = chit.members.some(m => m.userId === userId && m.status === 'approved');
+    if (!isMember && req.user.role !== 'superadmin') {
+      return res.status(403).json({ success: false, message: 'You are not an approved member of this chit' });
+    }
+
+    // Check if user already froze a month in this chit
+    const userAlreadyFroze = chit.freezes.some(f => f.userId === userId);
+    if (userAlreadyFroze) {
+      return res.status(400).json({ success: false, message: 'You have already frozen a month in this chit' });
+    }
+
+    // Check if the specific month is already frozen
+    const monthAlreadyFrozen = chit.freezes.some(f => f.monthNumber === Number(monthNumber));
+    if (monthAlreadyFrozen) {
+      return res.status(400).json({ success: false, message: 'This month is already frozen by another user' });
+    }
+
+    if (Number(monthNumber) < 1 || Number(monthNumber) > chit.durationMonths) {
+      return res.status(400).json({ success: false, message: 'Invalid month number' });
+    }
+
+    const newFreeze = await prisma.chitFreeze.create({
+      data: {
+        chitId,
+        userId,
+        monthNumber: Number(monthNumber)
+      },
+      include: {
+        user: { select: { id: true, name: true } }
+      }
+    });
+
+    res.json({
+      success: true,
+      message: `Month ${monthNumber} has been successfully frozen!`,
+      data: newFreeze
+    });
+  } catch (error) {
+    console.error('Error freezing month:', error);
+    res.status(500).json({ success: false, message: 'Server error freezing month' });
   }
 });
 

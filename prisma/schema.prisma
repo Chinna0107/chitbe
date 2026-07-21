@@ -27,6 +27,7 @@ model User {
   chitMembers    ChitMember[]
   payments       Payment[]
   createdChits   Chit[]        @relation("ChitCreator")
+  freezes        ChitFreeze[]
 }
 
 model Chit {
@@ -47,6 +48,7 @@ model Chit {
 
   members             ChitMember[]
   payments            Payment[]
+  freezes             ChitFreeze[]
   creator             User?         @relation("ChitCreator", fields: [createdBy], references: [id], onDelete: SetNull)
 }
 
@@ -84,4 +86,18 @@ model Payment {
   chit          Chit      @relation(fields: [chitId], references: [id], onDelete: Cascade)
 
   @@unique([userId, chitId, monthNumber]) // Prevent duplicate submissions for same user, chit, and month
+}
+
+model ChitFreeze {
+  id          String   @id @default(uuid())
+  chitId      String
+  userId      String
+  monthNumber Int
+  createdAt   DateTime @default(now())
+
+  chit        Chit     @relation(fields: [chitId], references: [id], onDelete: Cascade)
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([chitId, monthNumber]) // Only one user can freeze a specific month in a chit
+  @@unique([chitId, userId]) // A user can only freeze one month per chit
 }
