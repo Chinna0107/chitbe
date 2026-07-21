@@ -15,7 +15,7 @@ const app = express();
 
 // Middleware
 app.use(cors({
-  origin: ['http://localhost:5173', 'https://santoshchitfunds.vercel.app'],
+  origin: ['http://localhost:5173', 'https://santoshchitfunds.vercel.app','https://www.skschitbook.com','https://www.skschitbook.com'],
   credentials: true
 }));
 app.use(express.json());
