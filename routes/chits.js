@@ -107,6 +107,88 @@ router.get('/:id', protect, async (req, res) => {
   }
 });
 
+// @route   PUT /api/chits/:id
+// @desc    Update/edit a chit group
+// @access  Private/Staff
+router.put('/:id', protect, staff, async (req, res) => {
+  try {
+    const { name, totalMembers, chitValue, monthlyContribution, durationMonths, termsAndConditions } = req.body;
+
+    const chit = await prisma.chit.findUnique({
+      where: { id: req.params.id },
+      include: { members: true }
+    });
+
+    if (!chit) {
+      return res.status(404).json({ success: false, message: 'Chit not found' });
+    }
+
+    // Employees can only edit chits they created
+    if (req.user.role === 'employee' && chit.createdBy !== req.user.id) {
+      return res.status(403).json({ success: false, message: 'You can only edit chits assigned to you' });
+    }
+
+    // Only allow editing upcoming chits
+    if (chit.status !== 'upcoming') {
+      return res.status(400).json({ success: false, message: 'Only upcoming chits can be edited. Active or completed chits cannot be modified.' });
+    }
+
+    // If totalMembers is being reduced, check it doesn't go below already approved count
+    if (totalMembers) {
+      const approvedCount = chit.members.filter(m => m.status === 'approved').length;
+      if (Number(totalMembers) < approvedCount) {
+        return res.status(400).json({
+          success: false,
+          message: `Cannot reduce members below ${approvedCount} (already approved). Remove members first.`
+        });
+      }
+    }
+
+    const updateData = {};
+    if (name !== undefined) updateData.name = name;
+    if (totalMembers !== undefined) updateData.totalMembers = Number(totalMembers);
+    if (monthlyContribution !== undefined) updateData.monthlyContribution = Number(monthlyContribution);
+    if (durationMonths !== undefined) updateData.durationMonths = Number(durationMonths);
+    if (termsAndConditions !== undefined) updateData.termsAndConditions = termsAndConditions;
+
+    // Recalculate chitValue if monthly contribution or duration changed
+    const finalMonthly = monthlyContribution !== undefined ? Number(monthlyContribution) : chit.monthlyContribution;
+    const finalDuration = durationMonths !== undefined ? Number(durationMonths) : chit.durationMonths;
+    if (chitValue !== undefined) {
+      updateData.chitValue = Number(chitValue);
+    } else if (monthlyContribution !== undefined || durationMonths !== undefined) {
+      updateData.chitValue = finalMonthly * finalDuration;
+    }
+
+    const updatedChit = await prisma.chit.update({
+      where: { id: req.params.id },
+      data: updateData,
+      include: {
+        creator: { select: { name: true, role: true } },
+        members: {
+          include: {
+            user: {
+              select: { id: true, name: true, email: true, phone: true }
+            }
+          }
+        },
+        freezes: {
+          include: {
+            user: {
+              select: { id: true, name: true }
+            }
+          }
+        }
+      }
+    });
+
+    res.json({ success: true, message: 'Chit updated successfully', data: updatedChit });
+  } catch (error) {
+    console.error('Error updating chit:', error);
+    res.status(500).json({ success: false, message: 'Server error updating chit' });
+  }
+});
+
 // @route   POST /api/chits/:id/join
 // @desc    Request to join a chit
 // @access  Private
